@@ -1,9 +1,9 @@
 package com.translatorpro.app
 
 import android.app.Activity
-import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
@@ -11,6 +11,7 @@ import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 
 class MainActivity : Activity() {
 
@@ -38,6 +39,18 @@ class MainActivity : Activity() {
             setPadding(0, 32, 0, 32)
         }
 
+        val startBtn = Button(this).apply {
+            text = "▶ بدء الترجمة"
+            setOnClickListener { startOverlay() }
+        }
+
+        val stopBtn = Button(this).apply {
+            text = "⏹ إيقاف"
+            setOnClickListener {
+                stopService(Intent(this@MainActivity, OverlayService::class.java))
+            }
+        }
+
         val overlayBtn = Button(this).apply {
             text = "تفعيل العرض فوق التطبيقات"
             setOnClickListener { openOverlaySettings() }
@@ -50,6 +63,8 @@ class MainActivity : Activity() {
 
         root.addView(title)
         root.addView(statusText)
+        root.addView(startBtn)
+        root.addView(stopBtn)
         root.addView(overlayBtn)
         root.addView(miuiBtn)
         setContentView(root)
@@ -66,6 +81,20 @@ class MainActivity : Activity() {
         } else {
             "❌ صلاحية العرض فوق التطبيقات غير مفعّلة"
         }
+    }
+
+    private fun startOverlay() {
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "فعّل صلاحية العرض فوق التطبيقات أولاً", Toast.LENGTH_LONG).show()
+            return
+        }
+        val intent = Intent(this, OverlayService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        Toast.makeText(this, "ظهرت الأيقونة العائمة، افتح أي تطبيق", Toast.LENGTH_LONG).show()
     }
 
     private fun openOverlaySettings() {
