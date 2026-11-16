@@ -275,7 +275,7 @@ class OverlayService : Service() {
                 setColor(Color.parseColor("#FFFFEB3B"))
             }
         }
-        box.addView(handle, FrameLayout.LayoutParams(70, 70, Gravity.BOTTOM or Gravity.END))
+        box.addView(handle, FrameLayout.LayoutParams(100, 100, Gravity.BOTTOM or Gravity.RIGHT))
 
         var sx = 0; var sy = 0; var tx = 0f; var ty = 0f
         box.setOnTouchListener { v, e ->
