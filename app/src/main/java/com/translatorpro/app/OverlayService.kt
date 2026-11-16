@@ -532,22 +532,19 @@ class OverlayService : Service() {
             busy = false
         }
     }
-
-    private fun translateText(text: String) {
+        private fun translateText(text: String) {
         if (!modelReady) {
             toast("نموذج الترجمة لم يجهز بعد، انتظر قليلاً")
             busy = false
             return
         }
-        translator.translate(text)
-            .addOnSuccessListener { t ->
-                if (capturing) {
-                    lastSource = text
-                    showTranslation(t)
-                }
-                busy = false
+        TranslationEngine.translate(translator, text) { result ->
+            if (capturing) {
+                lastSource = text
+                showTranslation(result)
             }
-            .addOnFailureListener { busy = false }
+            busy = false
+        }
     }
 
     // ---------------- عرض الترجمة بجانب المربع ----------------
