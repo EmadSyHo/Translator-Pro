@@ -2,6 +2,8 @@ package com.translatorpro.app
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -16,8 +18,30 @@ import android.widget.Toast
 
 class MainActivity : Activity() {
 
-    private lateinit var statusText: TextView
     private val REQ_CAPTURE = 100
+    private lateinit var permBtn: Button
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun makeButton(label: String, bg: String, fg: String = "#FFFFFF", onClick: () -> Unit): Button {
+        return Button(this).apply {
+            text = label
+            setTextColor(Color.parseColor(fg))
+            textSize = 16f
+            isAllCaps = false
+            stateListAnimator = null
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(24).toFloat()
+                setColor(Color.parseColor(bg))
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(220), dp(52)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = dp(12)
+            }
+            setOnClickListener { onClick() }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -25,64 +49,59 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(48, 48, 48, 48)
+            setBackgroundColor(Color.WHITE)
+            setPadding(dp(24), dp(24), dp(24), dp(24))
             layoutDirection = View.LAYOUT_DIRECTION_RTL
         }
 
         val title = TextView(this).apply {
             text = "Translator Pro"
-            textSize = 26f
+            textSize = 28f
+            setTextColor(Color.parseColor("#1565C0"))
             gravity = Gravity.CENTER
         }
-
-        statusText = TextView(this).apply {
-            textSize = 16f
+        val sub = TextView(this).apply {
+            text = "ترجمة نصوص الشاشة والألعاب"
+            textSize = 14f
+            setTextColor(Color.parseColor("#757575"))
             gravity = Gravity.CENTER
-            setPadding(0, 32, 0, 32)
+            setPadding(0, dp(4), 0, dp(28))
         }
 
-        val startBtn = Button(this).apply {
-            text = "▶ بدء الترجمة"
-            setOnClickListener { requestCapture() }
+        val startBtn = makeButton("تفعيل الترجمة", "#1565C0") { requestCapture() }
+        val stopBtn = makeButton("إيقاف الترجمة", "#9E9E9E") {
+            stopService(Intent(this, OverlayService::class.java))
+            Toast.makeText(this, "تم إيقاف الترجمة", Toast.LENGTH_SHORT).show()
         }
-
-        val stopBtn = Button(this).apply {
-            text = "⏹ إيقاف"
-            setOnClickListener {
-                stopService(Intent(this@MainActivity, OverlayService::class.java))
+        permBtn = makeButton("فعّل العرض فوق التطبيقات", "#FFFFFF", "#1565C0") { openOverlaySettings() }.apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(24).toFloat()
+                setColor(Color.WHITE)
+                setStroke(dp(2), Color.parseColor("#1565C0"))
             }
         }
-
-        val overlayBtn = Button(this).apply {
-            text = "تفعيل العرض فوق التطبيقات"
-            setOnClickListener { openOverlaySettings() }
-        }
-
-        val miuiBtn = Button(this).apply {
+        val miui = TextView(this).apply {
             text = "إعدادات MIUI (التشغيل التلقائي والبطارية)"
+            textSize = 13f
+            setTextColor(Color.parseColor("#1565C0"))
+            gravity = Gravity.CENTER
+            setPadding(0, dp(28), 0, 0)
             setOnClickListener { openMiuiSettings() }
         }
 
         root.addView(title)
-        root.addView(statusText)
+        root.addView(sub)
+        root.addView(permBtn)
         root.addView(startBtn)
         root.addView(stopBtn)
-        root.addView(overlayBtn)
-        root.addView(miuiBtn)
+        root.addView(miui)
         setContentView(root)
     }
 
     override fun onResume() {
         super.onResume()
-        updateStatus()
-    }
-
-    private fun updateStatus() {
-        statusText.text = if (Settings.canDrawOverlays(this)) {
-            "✅ صلاحية العرض فوق التطبيقات مفعّلة"
-        } else {
-            "❌ صلاحية العرض فوق التطبيقات غير مفعّلة"
-        }
+        permBtn.visibility = if (Settings.canDrawOverlays(this)) View.GONE else View.VISIBLE
     }
 
     private fun requestCapture() {
@@ -116,11 +135,9 @@ class MainActivity : Activity() {
     }
 
     private fun openOverlaySettings() {
-        val intent = Intent(
-            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-            Uri.parse("package:$packageName")
+        startActivity(
+            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
         )
-        startActivity(intent)
     }
 
     private fun openMiuiSettings() {
@@ -134,11 +151,9 @@ class MainActivity : Activity() {
             }
             startActivity(intent)
         } catch (e: Exception) {
-            val intent = Intent(
-                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                Uri.parse("package:$packageName")
+            startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
             )
-            startActivity(intent)
         }
     }
 }
