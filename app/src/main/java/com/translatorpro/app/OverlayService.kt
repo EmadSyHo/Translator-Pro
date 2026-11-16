@@ -382,7 +382,7 @@ class OverlayService : Service() {
                 busy = true
                 doCapture()
             }
-            mainHandler.postDelayed(this, 700)
+            mainHandler.postDelayed(this, 400)
         }
     }
 
