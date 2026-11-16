@@ -43,6 +43,8 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 
 class OverlayService : Service() {
 
+    private class Grab(val bmp: Bitmap, val sig: IntArray, val bg: Int, val fg: Int)
+
     private lateinit var wm: WindowManager
     private lateinit var recognizer: TextRecognizer
     private lateinit var translator: Translator
@@ -55,6 +57,8 @@ class OverlayService : Service() {
 
     private var transView: TextView? = null
     private var transParams: WindowManager.LayoutParams? = null
+    private var transAdded = false
+    private var transShown = false
 
     private var projection: MediaProjection? = null
     private var vDisplay: VirtualDisplay? = null
@@ -71,7 +75,13 @@ class OverlayService : Service() {
     private var pending = false
     private var candidate: String? = null
     private var lastSource = ""
-    private var lastSig: Long? = null
+    private var lastSig: IntArray? = null
+    private var lastBg = Color.parseColor("#FF222222")
+    private var lastFg = Color.WHITE
+    private var lastCheck = 0L
+
+    private val CHECK_MS = 1000L
+    private val HIDE_WAIT_MS = 140L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -265,7 +275,7 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
+            gravity = Gravity.TOP or Gravity.LEFT
             x = 200; y = 500
         }
 
@@ -342,7 +352,7 @@ class OverlayService : Service() {
         boxLocked = false
     }
 
-    // ---------------- التقاط الشاشة + OCR + الترجمة ----------------
+    // ---------------- التقاط الشاشة ----------------
 
     private fun startCapture() {
         if (projection == null) {
@@ -353,6 +363,7 @@ class OverlayService : Service() {
         candidate = null
         lastSource = ""
         lastSig = null
+        lastCheck = 0L
         busy = false
         capturing = true
         mainHandler.post(tick)
@@ -366,6 +377,7 @@ class OverlayService : Service() {
         lastSource = ""
         lastSig = null
         mainHandler.removeCallbacks(tick)
+        mainHandler.removeCallbacks(hiddenCapture)
         hideTranslation()
         try { vDisplay?.release() } catch (_: Exception) {}
         vDisplay = null
@@ -375,12 +387,26 @@ class OverlayService : Service() {
         capH = 0
     }
 
+    private val hiddenCapture = Runnable { doCapture(true) }
+
     private val tick = object : Runnable {
         override fun run() {
             if (!capturing) return
             if (!busy) {
-                busy = true
-                doCapture()
+                if (transShown) {
+                    // الترجمة ظاهرة: لا نلتقط إلا فحصاً دورياً بعد إخفائها لحظة
+                    val now = System.currentTimeMillis()
+                    if (now - lastCheck >= CHECK_MS) {
+                        lastCheck = now
+                        busy = true
+                        transView?.alpha = 0f
+                        transShown = false
+                        mainHandler.postDelayed(hiddenCapture, HIDE_WAIT_MS)
+                    }
+                } else {
+                    busy = true
+                    doCapture(false)
+                }
             }
             mainHandler.postDelayed(this, 400)
         }
@@ -410,10 +436,15 @@ class OverlayService : Service() {
         return true
     }
 
-    private fun doCapture() {
+    private fun doCapture(hiddenCheck: Boolean) {
+        if (!capturing) {
+            busy = false
+            return
+        }
         val box = boxView
         val ok = try { ensureCapture() } catch (e: Exception) { false }
         if (box == null || !ok) {
+            if (hiddenCheck) restoreTranslation()
             busy = false
             return
         }
@@ -426,12 +457,12 @@ class OverlayService : Service() {
         )
         val r = reader
         bgHandler.post {
-            val crop = grabCrop(r, rect)
-            mainHandler.post { onCrop(crop) }
+            val g = grabCrop(r, rect)
+            mainHandler.post { onCrop(g, hiddenCheck) }
         }
     }
 
-    private fun grabCrop(r: ImageReader?, rect: Rect): Bitmap? {
+    private fun grabCrop(r: ImageReader?, rect: Rect): Grab? {
         val img = try { r?.acquireLatestImage() } catch (e: Exception) { null }
         if (img == null) return null
         try {
@@ -444,8 +475,9 @@ class OverlayService : Service() {
             val rr = rect.right.coerceIn(l + 1, img.width)
             val bb = rect.bottom.coerceIn(t + 1, img.height)
             val crop = Bitmap.createBitmap(bmp, l, t, rr - l, bb - t)
-            bmp.recycle()
-            return crop
+            if (crop !== bmp) bmp.recycle()
+            val colors = analyzeColors(crop)
+            return Grab(crop, makeSig(crop), colors[0], colors[1])
         } catch (e: Exception) {
             return null
         } finally {
@@ -453,27 +485,138 @@ class OverlayService : Service() {
         }
     }
 
-    private fun signature(b: Bitmap): Long {
-        val s = Bitmap.createScaledBitmap(b, 16, 8, true)
-        var h = 1125899906842597L
-        for (y in 0 until 8) {
-            for (x in 0 until 16) {
-                val p = s.getPixel(x, y)
-                val g = (((p shr 16) and 0xFF) + ((p shr 8) and 0xFF) + (p and 0xFF)) / 3
-                h = 31 * h + (g shr 4)
+    // بصمة الصورة: شبكة 32x16 من متوسطات الرمادي
+    private fun makeSig(b: Bitmap): IntArray {
+        val gw = 32
+        val gh = 16
+        val out = IntArray(gw * gh)
+        val w = b.width
+        val h = b.height
+        for (gy in 0 until gh) {
+            val y0 = gy * h / gh
+            val y1 = ((gy + 1) * h / gh).coerceAtLeast(y0 + 1).coerceAtMost(h)
+            for (gx in 0 until gw) {
+                val x0 = gx * w / gw
+                val x1 = ((gx + 1) * w / gw).coerceAtLeast(x0 + 1).coerceAtMost(w)
+                var sum = 0
+                for (sy in 0..2) {
+                    val py = (y0 + (y1 - y0) * (2 * sy + 1) / 6).coerceIn(0, h - 1)
+                    for (sx in 0..2) {
+                        val px = (x0 + (x1 - x0) * (2 * sx + 1) / 6).coerceIn(0, w - 1)
+                        val p = b.getPixel(px, py)
+                        sum += (((p shr 16) and 0xFF) + ((p shr 8) and 0xFF) + (p and 0xFF)) / 3
+                    }
+                }
+                out[gy * gw + gx] = sum / 9
             }
         }
-        if (s !== b) s.recycle()
-        return h
+        return out
     }
 
-    private fun onCrop(crop: Bitmap?) {
+    private fun sameSig(a: IntArray, b: IntArray?): Boolean {
+        if (b == null || a.size != b.size) return false
+        var diff = 0
+        for (i in a.indices) {
+            if (Math.abs(a[i] - b[i]) > 24) diff++
+        }
+        return diff < 3
+    }
+
+    private fun lum(c: Int): Int =
+        (299 * Color.red(c) + 587 * Color.green(c) + 114 * Color.blue(c)) / 1000
+
+    // يرجع [لون الخلفية, لون الخط]
+    private fun analyzeColors(b: Bitmap): IntArray {
+        val w = b.width
+        val h = b.height
+        val cnt = IntArray(4096)
+        val sr = LongArray(4096)
+        val sg = LongArray(4096)
+        val sb = LongArray(4096)
+        val ring = Math.max(1, Math.min(4, Math.min(w, h) / 2))
+
+        fun add(p: Int) {
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val bl = p and 0xFF
+            val k = ((r shr 4) shl 8) or ((g shr 4) shl 4) or (bl shr 4)
+            cnt[k]++
+            sr[k] += r.toLong()
+            sg[k] += g.toLong()
+            sb[k] += bl.toLong()
+        }
+
+        for (y in 0 until h) {
+            if (y < ring || y >= h - ring) {
+                var x = 0
+                while (x < w) {
+                    add(b.getPixel(x, y))
+                    x += 2
+                }
+            } else {
+                for (x in 0 until ring) add(b.getPixel(x, y))
+                for (x in (w - ring) until w) add(b.getPixel(x, y))
+            }
+        }
+
+        var best = 0
+        for (i in 1 until 4096) {
+            if (cnt[i] > cnt[best]) best = i
+        }
+        val n = Math.max(1, cnt[best]).toLong()
+        val bgR = (sr[best] / n).toInt()
+        val bgG = (sg[best] / n).toInt()
+        val bgB = (sb[best] / n).toInt()
+        val bgColor = Color.rgb(bgR, bgG, bgB)
+
+        var fr = 0L
+        var fg = 0L
+        var fb = 0L
+        var fn = 0
+        var y = 0
+        while (y < h) {
+            var x = 0
+            while (x < w) {
+                val p = b.getPixel(x, y)
+                val r = (p shr 16) and 0xFF
+                val g = (p shr 8) and 0xFF
+                val bl = p and 0xFF
+                if (Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(bl - bgB) > 220) {
+                    fr += r.toLong()
+                    fg += g.toLong()
+                    fb += bl.toLong()
+                    fn++
+                }
+                x += 3
+            }
+            y += 3
+        }
+
+        var fgColor = if (fn >= 12) {
+            Color.rgb((fr / fn).toInt(), (fg / fn).toInt(), (fb / fn).toInt())
+        } else {
+            if (lum(bgColor) > 140) Color.BLACK else Color.WHITE
+        }
+        if (Math.abs(lum(fgColor) - lum(bgColor)) < 110) {
+            fgColor = if (lum(bgColor) > 140) Color.BLACK else Color.WHITE
+        }
+        return intArrayOf(bgColor, fgColor)
+    }
+
+    // ---------------- معالجة النتيجة ----------------
+
+    private fun onCrop(g: Grab?, hiddenCheck: Boolean) {
         if (!capturing) {
-            crop?.recycle()
+            g?.bmp?.recycle()
             busy = false
             return
         }
-        if (crop == null) {
+        if (g == null) {
+            if (hiddenCheck) {
+                restoreTranslation()
+                busy = false
+                return
+            }
             // لا يوجد إطار جديد = الشاشة لم تتغير = النص مستقر
             val c = candidate
             if (pending && c != null) {
@@ -484,9 +627,14 @@ class OverlayService : Service() {
             }
             return
         }
-        val sig = signature(crop)
-                if (sig == lastSig) {
-            crop.recycle()
+
+        if (sameSig(g.sig, lastSig)) {
+            g.bmp.recycle()
+            if (hiddenCheck) {
+                restoreTranslation()
+                busy = false
+                return
+            }
             val c = candidate
             if (pending && c != null) {
                 pending = false
@@ -496,15 +644,18 @@ class OverlayService : Service() {
             }
             return
         }
-        lastSig = sig
-        recognizer.process(InputImage.fromBitmap(crop, 0))
+
+        lastSig = g.sig
+        lastBg = g.bg
+        lastFg = g.fg
+        recognizer.process(InputImage.fromBitmap(g.bmp, 0))
             .addOnSuccessListener { res ->
-                crop.recycle()
+                g.bmp.recycle()
                 val text = res.text.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
                 handleText(text)
             }
             .addOnFailureListener {
-                crop.recycle()
+                g.bmp.recycle()
                 busy = false
             }
     }
@@ -520,6 +671,7 @@ class OverlayService : Service() {
         }
         if (text == lastSource) {
             pending = false
+            restoreTranslation()
             busy = false
             return
         }
@@ -532,7 +684,8 @@ class OverlayService : Service() {
             busy = false
         }
     }
-        private fun translateText(text: String) {
+
+    private fun translateText(text: String) {
         if (!modelReady) {
             toast("نموذج الترجمة لم يجهز بعد، انتظر قليلاً")
             busy = false
@@ -547,65 +700,79 @@ class OverlayService : Service() {
         }
     }
 
-    // ---------------- عرض الترجمة بجانب المربع ----------------
+    // ---------------- عرض الترجمة مكان النص ----------------
 
     private fun showTranslation(text: String) {
-        val box = boxView ?: return
         val bp = boxParams ?: return
         if (!boxLocked) return
 
-        val m = realMetrics()
-        val w = box.width.coerceAtLeast(600).coerceAtMost(m.widthPixels - 20)
+        val inset = 6
+        val w = (bp.width - inset * 2).coerceAtLeast(60)
+        val h = (bp.height - inset * 2).coerceAtLeast(40)
 
         val tv = transView ?: TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 17f
             gravity = Gravity.CENTER
             layoutDirection = View.LAYOUT_DIRECTION_RTL
-            setPadding(24, 16, 24, 16)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = 20f
-                setColor(Color.parseColor("#E6212121"))
-            }
+            textDirection = View.TEXT_DIRECTION_RTL
+            includeFontPadding = false
+            setPadding(14, 8, 14, 8)
         }.also { transView = it }
 
+        tv.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = 14f
+            setColor(lastBg)
+        }
+        tv.setTextColor(lastFg)
         tv.text = text
-        tv.measure(
-            View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
-        )
-        val h = tv.measuredHeight
 
-        val loc = IntArray(2)
-        box.getLocationOnScreen(loc)
-        val offX = loc[0] - bp.x
-        val offY = loc[1] - bp.y
-
-        var desiredY = loc[1] - h - 12
-        if (desiredY < 0) desiredY = loc[1] + box.height + 12
-        if (desiredY + h > m.heightPixels) desiredY = (m.heightPixels - h).coerceAtLeast(0)
-        val desiredX = (loc[0] + (box.width - w) / 2).coerceIn(0, (m.widthPixels - w).coerceAtLeast(0))
+        // أكبر خط يتسع داخل المربع
+        var size = 26
+        while (size >= 9) {
+            tv.textSize = size.toFloat()
+            tv.measure(
+                View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+            )
+            if (tv.measuredHeight <= h) break
+            size -= 1
+        }
 
         val p = transParams ?: WindowManager.LayoutParams(
-            w, WindowManager.LayoutParams.WRAP_CONTENT, overlayType(),
+            w, h, overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START }
+        ).apply { gravity = Gravity.TOP or Gravity.LEFT }.also { transParams = it }
 
         p.width = w
-        p.x = desiredX - offX
-        p.y = desiredY - offY
-        transParams = p
+        p.height = h
+        p.x = bp.x + inset
+        p.y = bp.y + inset
 
-        if (tv.isAttachedToWindow) wm.updateViewLayout(tv, p) else wm.addView(tv, p)
+        tv.alpha = 1f
+        if (transAdded) {
+            wm.updateViewLayout(tv, p)
+        } else {
+            wm.addView(tv, p)
+            transAdded = true
+        }
+        transShown = true
+    }
+
+    private fun restoreTranslation() {
+        val tv = transView ?: return
+        if (!transAdded) return
+        tv.alpha = 1f
+        transShown = true
     }
 
     private fun hideTranslation() {
-        transView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+        transView?.let { if (transAdded) try { wm.removeView(it) } catch (_: Exception) {} }
         transView = null
         transParams = null
+        transAdded = false
+        transShown = false
     }
 
     override fun onDestroy() {
