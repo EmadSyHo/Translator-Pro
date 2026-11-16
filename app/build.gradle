@@ -11,8 +11,8 @@ android {
         applicationId "com.translatorpro.app"
         minSdk 24
         targetSdk 30
-        versionCode 1
-        versionName "0.1"
+        versionCode 3
+        versionName "0.3"
     }
 
     buildTypes {
@@ -29,4 +29,9 @@ android {
     kotlinOptions {
         jvmTarget = '1.8'
     }
+}
+
+dependencies {
+    implementation 'com.google.mlkit:text-recognition:16.0.0'
+    implementation 'com.google.mlkit:translate:17.0.2'
 }
