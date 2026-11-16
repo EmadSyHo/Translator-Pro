@@ -485,9 +485,15 @@ class OverlayService : Service() {
             return
         }
         val sig = signature(crop)
-        if (sig == lastSig && !pending) {
+                if (sig == lastSig) {
             crop.recycle()
-            busy = false
+            val c = candidate
+            if (pending && c != null) {
+                pending = false
+                translateText(c)
+            } else {
+                busy = false
+            }
             return
         }
         lastSig = sig
