@@ -346,9 +346,14 @@ class OverlayService : Service() {
     private fun updateBoxStyle() {
         val box = boxView ?: return
         val p = boxParams ?: return
+        val strokeColor = when {
+            boxLocked && lastSource.isNotEmpty() -> Color.TRANSPARENT
+            boxLocked -> Color.parseColor("#FF4CAF50")
+            else -> Color.parseColor("#FFFFEB3B")
+        }
         box.background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
-            setStroke(6, if (boxLocked) Color.parseColor("#FF4CAF50") else Color.parseColor("#FFFFEB3B"))
+            setStroke(6, strokeColor)
             setColor(if (boxLocked) Color.TRANSPARENT else Color.parseColor("#22FFFFFF"))
         }
         box.getChildAt(0)?.visibility = if (boxLocked) View.GONE else View.VISIBLE
@@ -760,6 +765,7 @@ class OverlayService : Service() {
             // لا يوجد نص: نزيل الترجمة ونراقب ظهور نص جديد
             hideTranslation()
             lastSource = ""
+            updateBoxStyle()
             candidate = null
             pending = false
             refreshing = false
@@ -815,16 +821,19 @@ class OverlayService : Service() {
             layoutDirection = View.LAYOUT_DIRECTION_RTL
             textDirection = View.TEXT_DIRECTION_RTL
             includeFontPadding = false
-            setPadding(14, 8, 14, 8)
         }.also { transView = it }
 
         val alphaPct = Prefs.getInt(this, "alpha", 100)
         val bgWithAlpha = (lastBg and 0x00FFFFFF) or ((alphaPct * 255 / 100) shl 24)
+        val roundPct = Prefs.getInt(this, "radius", 25)
+        val corner = (h / 2f) * roundPct / 100f
         tv.background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
-            cornerRadius = 14f
+            cornerRadius = corner
             setColor(bgWithAlpha)
         }
+        val padX = 14 + (corner * 0.6f).toInt()
+        tv.setPadding(padX, 8, padX, 8)
         tv.setTextColor(lastFg)
         tv.text = text
 
@@ -863,6 +872,7 @@ class OverlayService : Service() {
         transShown = true
         refreshing = false
         lastCheck = System.currentTimeMillis()
+        updateBoxStyle()
     }
 
     private fun hideTranslation() {
