@@ -54,6 +54,7 @@ class OverlayService : Service() {
     private var boxView: FrameLayout? = null
     private var boxParams: WindowManager.LayoutParams? = null
     private var boxLocked = false
+    private var watcher: View? = null
 
     private var transView: TextView? = null
     private var transParams: WindowManager.LayoutParams? = null
@@ -72,6 +73,7 @@ class OverlayService : Service() {
 
     private var capturing = false
     private var busy = false
+    private var refreshing = false
     private var pending = false
     private var candidate: String? = null
     private var lastSource = ""
@@ -79,9 +81,10 @@ class OverlayService : Service() {
     private var lastBg = Color.parseColor("#FF222222")
     private var lastFg = Color.WHITE
     private var lastCheck = 0L
+    private var tapRunnable: Runnable? = null
 
-    private val CHECK_MS = 1000L
     private val HIDE_WAIT_MS = 140L
+    private val TAP_DELAY_MS = 800L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -352,6 +355,50 @@ class OverlayService : Service() {
         boxLocked = false
     }
 
+    // ---------------- مراقبة اللمس ----------------
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun addWatcher() {
+        if (watcher != null) return
+        val v = View(this)
+        v.setOnTouchListener { _, e ->
+            if (e.action == MotionEvent.ACTION_OUTSIDE) onUserTouch()
+            false
+        }
+        val p = WindowManager.LayoutParams(
+            1, 1, overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.LEFT
+            x = 0; y = 0
+        }
+        try {
+            wm.addView(v, p)
+            watcher = v
+        } catch (_: Exception) {}
+    }
+
+    private fun removeWatcher() {
+        watcher?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+        watcher = null
+    }
+
+    private fun onUserTouch() {
+        if (!capturing || Prefs.getInt(this, "touch", 1) == 0) return
+        tapRunnable?.let { mainHandler.removeCallbacks(it) }
+        val r = object : Runnable {
+            override fun run() {
+                if (!capturing || !transShown) return
+                if (busy) mainHandler.postDelayed(this, 300) else startRefresh()
+            }
+        }
+        tapRunnable = r
+        mainHandler.postDelayed(r, TAP_DELAY_MS)
+    }
+
     // ---------------- التقاط الشاشة ----------------
 
     private fun startCapture() {
@@ -360,24 +407,30 @@ class OverlayService : Service() {
             return
         }
         pending = false
+        refreshing = false
         candidate = null
         lastSource = ""
         lastSig = null
-        lastCheck = 0L
+        lastCheck = System.currentTimeMillis()
         busy = false
         capturing = true
+        addWatcher()
         mainHandler.post(tick)
     }
 
     private fun stopCapture() {
         capturing = false
         busy = false
+        refreshing = false
         pending = false
         candidate = null
         lastSource = ""
         lastSig = null
         mainHandler.removeCallbacks(tick)
-        mainHandler.removeCallbacks(hiddenCapture)
+        mainHandler.removeCallbacks(refreshCapture)
+        tapRunnable?.let { mainHandler.removeCallbacks(it) }
+        tapRunnable = null
+        removeWatcher()
         hideTranslation()
         try { vDisplay?.release() } catch (_: Exception) {}
         vDisplay = null
@@ -387,28 +440,45 @@ class OverlayService : Service() {
         capH = 0
     }
 
-    private val hiddenCapture = Runnable { doCapture(true) }
+    private val refreshCapture = Runnable { doCapture() }
 
     private val tick = object : Runnable {
         override fun run() {
             if (!capturing) return
             if (!busy) {
-                if (transShown) {
-                    // الترجمة ظاهرة: لا نلتقط إلا فحصاً دورياً بعد إخفائها لحظة
-                    val now = System.currentTimeMillis()
-                    if (now - lastCheck >= CHECK_MS) {
-                        lastCheck = now
-                        busy = true
-                        transView?.alpha = 0f
-                        transShown = false
-                        mainHandler.postDelayed(hiddenCapture, HIDE_WAIT_MS)
-                    }
+                if (refreshing) {
+                    busy = true
+                    doCapture()
+                } else if (transShown) {
+                    val iv = Prefs.getInt(this@OverlayService, "interval", 10) * 1000L
+                    if (iv > 0 && System.currentTimeMillis() - lastCheck >= iv) startRefresh()
                 } else {
                     busy = true
-                    doCapture(false)
+                    doCapture()
                 }
             }
-            mainHandler.postDelayed(this, 400)
+            mainHandler.postDelayed(this, 300)
+        }
+    }
+
+    // إخفاء الترجمة لحظة ثم التقاط المنطقة للتأكد من تغيّر النص
+    private fun startRefresh() {
+        if (busy || !transShown) return
+        busy = true
+        lastCheck = System.currentTimeMillis()
+        transView?.alpha = 0f
+        transShown = false
+        refreshing = true
+        mainHandler.postDelayed(refreshCapture, HIDE_WAIT_MS)
+    }
+
+    private fun finishRefresh() {
+        refreshing = false
+        lastCheck = System.currentTimeMillis()
+        val tv = transView
+        if (tv != null && transAdded && lastSource.isNotEmpty()) {
+            tv.alpha = 1f
+            transShown = true
         }
     }
 
@@ -436,7 +506,7 @@ class OverlayService : Service() {
         return true
     }
 
-    private fun doCapture(hiddenCheck: Boolean) {
+    private fun doCapture() {
         if (!capturing) {
             busy = false
             return
@@ -444,7 +514,7 @@ class OverlayService : Service() {
         val box = boxView
         val ok = try { ensureCapture() } catch (e: Exception) { false }
         if (box == null || !ok) {
-            if (hiddenCheck) restoreTranslation()
+            if (refreshing) finishRefresh()
             busy = false
             return
         }
@@ -458,7 +528,7 @@ class OverlayService : Service() {
         val r = reader
         bgHandler.post {
             val g = grabCrop(r, rect)
-            mainHandler.post { onCrop(g, hiddenCheck) }
+            mainHandler.post { onCrop(g) }
         }
     }
 
@@ -605,43 +675,31 @@ class OverlayService : Service() {
 
     // ---------------- معالجة النتيجة ----------------
 
-    private fun onCrop(g: Grab?, hiddenCheck: Boolean) {
+    // الشاشة مستقرة (لا إطار جديد أو لا تغيّر): نترجم المرشح إن وُجد وإلا نعيد الترجمة
+    private fun stable() {
+        val c = candidate
+        if (pending && c != null) {
+            pending = false
+            translateText(c)
+        } else {
+            if (refreshing) finishRefresh()
+            busy = false
+        }
+    }
+
+    private fun onCrop(g: Grab?) {
         if (!capturing) {
             g?.bmp?.recycle()
             busy = false
             return
         }
         if (g == null) {
-            if (hiddenCheck) {
-                restoreTranslation()
-                busy = false
-                return
-            }
-            // لا يوجد إطار جديد = الشاشة لم تتغير = النص مستقر
-            val c = candidate
-            if (pending && c != null) {
-                pending = false
-                translateText(c)
-            } else {
-                busy = false
-            }
+            stable()
             return
         }
-
         if (sameSig(g.sig, lastSig)) {
             g.bmp.recycle()
-            if (hiddenCheck) {
-                restoreTranslation()
-                busy = false
-                return
-            }
-            val c = candidate
-            if (pending && c != null) {
-                pending = false
-                translateText(c)
-            } else {
-                busy = false
-            }
+            stable()
             return
         }
 
@@ -656,22 +714,26 @@ class OverlayService : Service() {
             }
             .addOnFailureListener {
                 g.bmp.recycle()
+                if (refreshing) finishRefresh()
                 busy = false
             }
     }
 
     private fun handleText(text: String) {
         if (text.length < 2) {
+            // لا يوجد نص: نزيل الترجمة ونراقب ظهور نص جديد
             hideTranslation()
             lastSource = ""
             candidate = null
             pending = false
+            refreshing = false
             busy = false
             return
         }
         if (text == lastSource) {
             pending = false
-            restoreTranslation()
+            candidate = null
+            finishRefresh()
             busy = false
             return
         }
@@ -688,12 +750,14 @@ class OverlayService : Service() {
     private fun translateText(text: String) {
         if (!modelReady) {
             toast("نموذج الترجمة لم يجهز بعد، انتظر قليلاً")
+            if (refreshing) finishRefresh()
             busy = false
             return
         }
         TranslationEngine.translate(translator, text) { result ->
             if (capturing) {
                 lastSource = text
+                candidate = null
                 showTranslation(result)
             }
             busy = false
@@ -718,24 +782,27 @@ class OverlayService : Service() {
             setPadding(14, 8, 14, 8)
         }.also { transView = it }
 
+        val alphaPct = Prefs.getInt(this, "alpha", 100)
+        val bgWithAlpha = (lastBg and 0x00FFFFFF) or ((alphaPct * 255 / 100) shl 24)
         tv.background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = 14f
-            setColor(lastBg)
+            setColor(bgWithAlpha)
         }
         tv.setTextColor(lastFg)
         tv.text = text
 
-        // أكبر خط يتسع داخل المربع
-        var size = 26
-        while (size >= 9) {
-            tv.textSize = size.toFloat()
+        // أكبر خط يتسع داخل المربع حسب إعداد الحجم
+        val fontPct = Prefs.getInt(this, "font", 100)
+        var size = 26f * fontPct / 100f
+        while (size >= 9f) {
+            tv.textSize = size
             tv.measure(
                 View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
                 View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
             )
             if (tv.measuredHeight <= h) break
-            size -= 1
+            size -= 1f
         }
 
         val p = transParams ?: WindowManager.LayoutParams(
@@ -758,13 +825,8 @@ class OverlayService : Service() {
             transAdded = true
         }
         transShown = true
-    }
-
-    private fun restoreTranslation() {
-        val tv = transView ?: return
-        if (!transAdded) return
-        tv.alpha = 1f
-        transShown = true
+        refreshing = false
+        lastCheck = System.currentTimeMillis()
     }
 
     private fun hideTranslation() {
