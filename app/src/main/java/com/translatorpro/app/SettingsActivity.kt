@@ -9,6 +9,7 @@ import android.view.View
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.SeekBar
 
 class SettingsActivity : Activity() {
 
@@ -23,7 +24,7 @@ class SettingsActivity : Activity() {
             setPadding(dp(20), dp(24), dp(20), dp(32))
             layoutDirection = View.LAYOUT_DIRECTION_RTL
         }
-
+        addSlider(root, "استدارة زوايا مربع الترجمة", "radius", 25)
         root.addView(TextView(this).apply {
             text = "الإعدادات"
             textSize = 24f
@@ -61,7 +62,53 @@ class SettingsActivity : Activity() {
             addView(root)
         })
     }
+    private fun addSlider(parent: LinearLayout, title: String, key: String, def: Int) {
+        parent.addView(TextView(this).apply {
+            text = title
+            textSize = 16f
+            setTextColor(Color.parseColor("#212121"))
+            setPadding(0, dp(22), 0, dp(2))
+        })
 
+        val preview = TextView(this).apply {
+            text = "معاينة"
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(dp(160), dp(44)).apply { topMargin = dp(10) }
+        }
+        fun paint(pct: Int) {
+            preview.background = GradientDrawable().apply {
+                cornerRadius = dp(44) / 2f * pct / 100f
+                setColor(Color.parseColor("#616161"))
+            }
+        }
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val bar = SeekBar(this).apply {
+            max = 100
+            progress = Prefs.getInt(this@SettingsActivity, key, def)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                    paint(p)
+                    if (fromUser) Prefs.putInt(this@SettingsActivity, key, p)
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+        paint(bar.progress)
+        row.addView(TextView(this).apply { text = "حادة"; textSize = 12f })
+        row.addView(bar)
+        row.addView(TextView(this).apply { text = "دائرية"; textSize = 12f })
+        parent.addView(row)
+        parent.addView(preview)
+    }
     private fun addSetting(
         parent: LinearLayout, title: String, hint: String, key: String, def: Int,
         labels: List<String>, values: List<Int>
