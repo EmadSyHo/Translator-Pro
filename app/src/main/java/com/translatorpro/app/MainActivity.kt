@@ -15,6 +15,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.FrameLayout
 
 class MainActivity : Activity() {
 
@@ -95,8 +96,31 @@ class MainActivity : Activity() {
         root.addView(permBtn)
         root.addView(startBtn)
         root.addView(stopBtn)
-        root.addView(miui)
-        setContentView(root)
+                val frame = FrameLayout(this)
+        frame.setBackgroundColor(Color.WHITE)
+        frame.addView(
+            root,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        val gear = TextView(this).apply {
+            text = "⚙"
+            textSize = 30f
+            setTextColor(Color.parseColor("#757575"))
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            setOnClickListener { startActivity(Intent(this@MainActivity, SettingsActivity::class.java)) }
+        }
+        frame.addView(
+            gear,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.LEFT
+            )
+        )
+        setContentView(frame)
     }
 
     override fun onResume() {
