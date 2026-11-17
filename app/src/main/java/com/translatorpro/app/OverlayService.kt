@@ -5,10 +5,13 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
@@ -56,6 +59,12 @@ class OverlayService : Service() {
     private var boxLocked = false
     private var watcher: View? = null
 
+    // آخر مكان وحجم للمربع (يُستعاد عند إظهاره من جديد)
+    private var savedX = 200
+    private var savedY = 500
+    private var savedW = 600
+    private var savedH = 220
+
     private var transView: TextView? = null
     private var transParams: WindowManager.LayoutParams? = null
     private var transAdded = false
@@ -83,7 +92,7 @@ class OverlayService : Service() {
     private var lastCheck = 0L
     private var tapRunnable: Runnable? = null
 
-    private val HIDE_WAIT_MS = 140L
+    private val HIDE_WAIT_MS = 250L
     private val TAP_DELAY_MS = 800L
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -249,7 +258,17 @@ class OverlayService : Service() {
     }
 
     private fun onSingleTap() {
-        if (boxView == null) createBox() else removeBox()
+        when {
+            boxView == null -> createBox()
+            boxLocked -> {
+                // فك التثبيت فقط: يبقى المربع بمكانه وحجمه ليتحرك أو يتغير
+                boxLocked = false
+                stopCapture()
+                updateBoxStyle()
+                toast("تم فك التثبيت، حرّك المربع ثم اضغط مرتين لتثبيته")
+            }
+            else -> removeBox()
+        }
     }
 
     private fun onDoubleTap() {
@@ -274,20 +293,15 @@ class OverlayService : Service() {
     private fun createBox() {
         val box = FrameLayout(this)
         val p = WindowManager.LayoutParams(
-            600, 220, overlayType(),
+            savedW, savedH, overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.LEFT
-            x = 200; y = 500
+            x = savedX; y = savedY
         }
 
-        val handle = View(this).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                setColor(Color.parseColor("#FFFFEB3B"))
-            }
-        }
+        val handle = ResizeHandle(this)
         box.addView(handle, FrameLayout.LayoutParams(100, 100, Gravity.BOTTOM or Gravity.RIGHT))
 
         var sx = 0; var sy = 0; var tx = 0f; var ty = 0f
@@ -349,6 +363,12 @@ class OverlayService : Service() {
 
     private fun removeBox() {
         stopCapture()
+        boxParams?.let {
+            savedX = it.x
+            savedY = it.y
+            savedW = it.width
+            savedH = it.height
+        }
         boxView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         boxView = null
         boxParams = null
@@ -461,12 +481,13 @@ class OverlayService : Service() {
         }
     }
 
-    // إخفاء الترجمة لحظة ثم التقاط المنطقة للتأكد من تغيّر النص
+    // إزالة نافذة الترجمة لحظة ثم التقاط المنطقة للتأكد من تغيّر النص
     private fun startRefresh() {
         if (busy || !transShown) return
         busy = true
         lastCheck = System.currentTimeMillis()
-        transView?.alpha = 0f
+        transView?.let { if (transAdded) try { wm.removeView(it) } catch (_: Exception) {} }
+        transAdded = false
         transShown = false
         refreshing = true
         mainHandler.postDelayed(refreshCapture, HIDE_WAIT_MS)
@@ -476,9 +497,13 @@ class OverlayService : Service() {
         refreshing = false
         lastCheck = System.currentTimeMillis()
         val tv = transView
-        if (tv != null && transAdded && lastSource.isNotEmpty()) {
-            tv.alpha = 1f
-            transShown = true
+        val p = transParams
+        if (tv != null && p != null && !transAdded && lastSource.isNotEmpty() && boxLocked) {
+            try {
+                wm.addView(tv, p)
+                transAdded = true
+                transShown = true
+            } catch (_: Exception) {}
         }
     }
 
@@ -719,8 +744,19 @@ class OverlayService : Service() {
             }
     }
 
+    // يتأكد أن النص المقروء يشبه كلاماً إنجليزياً وليس ضوضاء
+    private fun looksLikeText(t: String): Boolean {
+        val chars = t.count { !it.isWhitespace() }
+        val letters = t.count { it.isLetter() }
+        if (letters < 2 || letters * 100 / chars < 60) return false
+        return t.split(" ").any { w ->
+            val x = w.filter { it.isLetter() }
+            x.length >= 2 && x.any { it.lowercaseChar() in "aeiouy" }
+        }
+    }
+
     private fun handleText(text: String) {
-        if (text.length < 2) {
+        if (text.length < 2 || !looksLikeText(text)) {
             // لا يوجد نص: نزيل الترجمة ونراقب ظهور نص جديد
             hideTranslation()
             lastSource = ""
@@ -847,5 +883,39 @@ class OverlayService : Service() {
         try { recognizer.close() } catch (_: Exception) {}
         try { translator.close() } catch (_: Exception) {}
         super.onDestroy()
+    }
+}
+
+// مقبض التكبير والتصغير: سهمان متعاكسان بخلفية شفافة
+private class ResizeHandle(ctx: Context) : View(ctx) {
+    private val dark = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#99000000")
+        strokeWidth = 11f
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val light = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#E6FFEB3B")
+        strokeWidth = 6f
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+
+    override fun onDraw(c: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val pad = w * 0.2f
+        val len = w * 0.28f
+        val x1 = pad
+        val y1 = pad
+        val x2 = w - pad
+        val y2 = h - pad
+        for (p in arrayOf(dark, light)) {
+            c.drawLine(x1, y1, x2, y2, p)
+            c.drawLine(x2, y2, x2 - len, y2, p)
+            c.drawLine(x2, y2, x2, y2 - len, p)
+            c.drawLine(x1, y1, x1 + len, y1, p)
+            c.drawLine(x1, y1, x1, y1 + len, p)
+        }
     }
 }
