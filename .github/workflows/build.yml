@@ -31,7 +31,10 @@ jobs:
 
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
-
+      - name: Print APK info
+        run: |
+          APKSIGNER=$(ls -d $ANDROID_HOME/build-tools/*/apksigner | tail -1)
+          $APKSIGNER verify --print-certs app/build/outputs/apk/debug/app-debug.apk | head -3
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
