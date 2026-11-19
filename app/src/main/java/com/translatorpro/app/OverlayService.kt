@@ -69,16 +69,29 @@ class OverlayService : Service() {
     private var modelReady = false
 
     private var iconView: TextView? = null
-    private var iconParams: WindowManager.LayoutParams? = null
-    private var iconHidden = false
     private var boxView: FrameLayout? = null
     private var boxParams: WindowManager.LayoutParams? = null
     private var boxLocked = false
     private var watcher: View? = null
 
-    // ترجمة الشاشة كاملة
-    private var fullView: FrameLayout? = null
+    // ترجمة الشاشة كاملة (مستمرة)
+    private var fullLive = false
+    private var fullGen = 0
     private var fullBusy = false
+    private var fullContainer: FrameLayout? = null
+    private var fullParams: WindowManager.LayoutParams? = null
+    private var fullOx = 0
+    private var fullOy = 0
+    private var fullOffsetKnown = false
+    private var fullShown = false
+    private var fullKey = ""
+    private var fullCand = ""
+    private var fullCandItems: List<FullItem>? = null
+    private var fullSig: IntArray? = null
+    private var fullNextAt = 0L
+    private var fullLastCheck = 0L
+    private var fullTouchAt = 0L
+    private var fullTouchPending = false
 
     // آخر مكان وحجم للمربع (يُستعاد عند إظهاره من جديد)
     private var savedX = 200
@@ -158,8 +171,7 @@ class OverlayService : Service() {
                         override fun onStop() {
                             mainHandler.post {
                                 stopCapture()
-                                removeFull()
-                                fullBusy = false
+                                stopFull()
                                 projection = null
                             }
                         }
@@ -246,7 +258,6 @@ class OverlayService : Service() {
             gravity = Gravity.TOP or Gravity.LEFT
             x = 20; y = 300
         }
-        iconParams = p
 
         var startX = 0; var startY = 0
         var touchX = 0f; var touchY = 0f
@@ -313,29 +324,10 @@ class OverlayService : Service() {
         wm.addView(icon, p)
     }
 
-    private fun hideIcon() {
-        val v = iconView ?: return
-        if (iconHidden) return
-        try { wm.removeView(v) } catch (_: Exception) {}
-        iconHidden = true
-    }
-
-    // يعيد الأيقونة فوق كل النوافذ الأخرى
-    private fun showIconOnTop() {
-        val v = iconView ?: return
-        val p = iconParams ?: return
-        if (!iconHidden) {
-            try { wm.removeView(v) } catch (_: Exception) {}
-        }
-        try { wm.addView(v, p) } catch (_: Exception) {}
-        iconHidden = false
-    }
-
     private fun onSingleTap() {
-        if (fullBusy) return
-        if (fullView != null) {
-            removeFull()
-            toast("تم إخفاء ترجمة الشاشة")
+        if (fullLive) {
+            stopFull()
+            toast("تم إيقاف ترجمة الشاشة الكاملة")
             return
         }
         when {
@@ -352,7 +344,11 @@ class OverlayService : Service() {
     }
 
     private fun onDoubleTap() {
-        if (fullBusy) return
+        if (fullLive) {
+            stopFull()
+            toast("تم إيقاف ترجمة الشاشة الكاملة")
+            return
+        }
         if (boxView == null) {
             toast("اضغط مرة واحدة لإظهار المربع أولاً")
             return
@@ -369,7 +365,12 @@ class OverlayService : Service() {
     }
 
     private fun onLongPress() {
-        startFullTranslate()
+        if (fullLive) {
+            stopFull()
+            toast("تم إيقاف ترجمة الشاشة الكاملة")
+        } else {
+            startFullLive()
+        }
     }
 
     // ---------------- مربع التحديد ----------------
@@ -497,6 +498,17 @@ class OverlayService : Service() {
     }
 
     private fun onUserTouch() {
+        if (fullLive) {
+            if (Prefs.getInt(this, "touch", 1) == 0) return
+            val now = System.currentTimeMillis()
+            if (fullShown) {
+                fullTouchPending = true
+                fullTouchAt = now + TAP_DELAY_MS
+            } else {
+                fullNextAt = Math.min(fullNextAt, now + 700)
+            }
+            return
+        }
         if (!capturing || Prefs.getInt(this, "touch", 1) == 0) return
         tapRunnable?.let { mainHandler.removeCallbacks(it) }
         val r = object : Runnable {
@@ -549,9 +561,9 @@ class OverlayService : Service() {
         mainHandler.removeCallbacks(refreshCapture)
         tapRunnable?.let { mainHandler.removeCallbacks(it) }
         tapRunnable = null
-        removeWatcher()
+        if (!fullLive) removeWatcher()
         hideTranslation()
-        resetCaptureResources()
+        if (!fullLive) resetCaptureResources()
     }
 
     private val refreshCapture = Runnable { doCapture() }
@@ -702,13 +714,13 @@ class OverlayService : Service() {
         return out
     }
 
-    private fun sameSig(a: IntArray, b: IntArray?): Boolean {
+    private fun sameSig(a: IntArray, b: IntArray?, maxDiff: Int = 3): Boolean {
         if (b == null || a.size != b.size) return false
         var diff = 0
         for (i in a.indices) {
             if (Math.abs(a[i] - b[i]) > 24) diff++
         }
-        return diff < 3
+        return diff < maxDiff
     }
 
     private fun lum(c: Int): Int =
@@ -972,17 +984,10 @@ class OverlayService : Service() {
         transShown = false
     }
 
-    // ---------------- ترجمة الشاشة كاملة ----------------
+    // ---------------- ترجمة الشاشة كاملة (مستمرة) ----------------
 
-    private val fullTimeout = Runnable {
-        if (fullBusy) {
-            toast("انتهت مهلة ترجمة الشاشة، حاول مرة أخرى")
-            finishFull()
-        }
-    }
-
-    private fun startFullTranslate() {
-        if (fullBusy) return
+    private fun startFullLive() {
+        if (fullLive) return
         if (projection == null) {
             toast("إذن التقاط الشاشة غير متوفر. أوقف التطبيق وابدأ الترجمة من جديد")
             return
@@ -992,41 +997,159 @@ class OverlayService : Service() {
             return
         }
         if (boxView != null) removeBox()
-        removeFull()
-        fullBusy = true
-        mainHandler.postDelayed(fullTimeout, 20000)
-        mainHandler.postDelayed({
-            if (!fullBusy) return@postDelayed
-            hideIcon()
-            resetCaptureResources()
-            mainHandler.postDelayed({ captureFull(0) }, 300)
-        }, 250)
+        if (!createFullContainer()) {
+            toast("تعذر عرض الترجمة")
+            return
+        }
+        fullLive = true
+        fullGen++
+        fullBusy = false
+        fullShown = false
+        fullKey = ""
+        fullCand = ""
+        fullCandItems = null
+        fullSig = null
+        fullNextAt = 0L
+        fullLastCheck = System.currentTimeMillis()
+        fullTouchPending = false
+        addWatcher()
+        toast("ترجمة الشاشة الكاملة تعمل ✅ اضغط مطولاً للإيقاف")
+        mainHandler.post(fullTick)
     }
 
-    private fun captureFull(attempt: Int) {
-        if (!fullBusy) return
+    private fun stopFull() {
+        fullLive = false
+        fullGen++
+        fullBusy = false
+        fullShown = false
+        fullKey = ""
+        fullCand = ""
+        fullCandItems = null
+        fullSig = null
+        fullTouchPending = false
+        mainHandler.removeCallbacks(fullTick)
+        fullContainer?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+        fullContainer = null
+        fullParams = null
+        fullOffsetKnown = false
+        if (!capturing) {
+            removeWatcher()
+            resetCaptureResources()
+        }
+    }
+
+    private fun createFullContainer(): Boolean {
+        val m = realMetrics()
+        val container = FrameLayout(this)
+        container.layoutDirection = View.LAYOUT_DIRECTION_LTR
+        val p = WindowManager.LayoutParams(
+            m.widthPixels, m.heightPixels, overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.LEFT
+            x = 0
+            y = 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        return try {
+            wm.addView(container, p)
+            fullContainer = container
+            fullParams = p
+            fullOffsetKnown = false
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private val fullTick = object : Runnable {
+        override fun run() {
+            if (!fullLive) return
+            if (!fullBusy) {
+                val now = System.currentTimeMillis()
+                if (fullShown) {
+                    val iv = Prefs.getInt(this@OverlayService, "fullInterval", 5) * 1000L
+                    val byTouch = fullTouchPending && now >= fullTouchAt
+                    val byTime = iv > 0 && now - fullLastCheck >= iv
+                    if (byTouch || byTime) startFullCheck(true)
+                } else if (now >= fullNextAt) {
+                    startFullCheck(false)
+                }
+            }
+            mainHandler.postDelayed(this, 300)
+        }
+    }
+
+    private fun startFullCheck(hide: Boolean) {
+        fullBusy = true
+        fullLastCheck = System.currentTimeMillis()
+        fullTouchPending = false
+        val gen = fullGen
+        val c = fullContainer
+        val fp = fullParams
+        val m = realMetrics()
+        if (c != null && fp != null && (fp.width != m.widthPixels || fp.height != m.heightPixels)) {
+            fp.width = m.widthPixels
+            fp.height = m.heightPixels
+            try { wm.updateViewLayout(c, fp) } catch (_: Exception) {}
+            fullOffsetKnown = false
+            clearFullOverlay()
+        }
+        if (hide && c != null) c.visibility = View.INVISIBLE
+        mainHandler.postDelayed({
+            if (fullLive && gen == fullGen) grabFull(0, gen)
+        }, if (hide) 220L else 0L)
+    }
+
+    private fun fullRestore() {
+        fullContainer?.visibility = View.VISIBLE
+    }
+
+    private fun grabFull(attempt: Int, gen: Int) {
+        if (!fullLive || gen != fullGen) return
         val ok = try { ensureCapture() } catch (e: Exception) { false }
         if (!ok) {
-            toast("تعذر التقاط الشاشة")
-            finishFull()
+            fullRestore()
+            fullBusy = false
+            fullNextAt = System.currentTimeMillis() + 2000
             return
         }
         val r = reader
         bgHandler.post {
             val bmp = grabFullBitmap(r)
             mainHandler.post {
-                if (!fullBusy) {
+                if (!fullLive || gen != fullGen) {
                     bmp?.recycle()
                     return@post
                 }
+                val maxAttempts = if (fullCand.isNotEmpty()) 4 else 12
                 if (bmp != null) {
-                    resetCaptureResources()
-                    processFull(bmp)
-                } else if (attempt < 10) {
-                    mainHandler.postDelayed({ captureFull(attempt + 1) }, 200)
+                    fullRestore()
+                    processFull(bmp, gen)
+                } else if (attempt < maxAttempts) {
+                    mainHandler.postDelayed({ grabFull(attempt + 1, gen) }, 150)
                 } else {
-                    toast("تعذر التقاط الشاشة")
-                    finishFull()
+                    // لا إطار جديد = الشاشة لم تتغير
+                    fullRestore()
+                    val ci = fullCandItems
+                    if (fullCand.isNotEmpty() && ci != null) {
+                        val k = fullCand
+                        fullCand = ""
+                        fullCandItems = null
+                        translateAndRender(ci, k, gen)
+                    } else {
+                        fullBusy = false
+                        val now = System.currentTimeMillis()
+                        fullNextAt = now + 1500
+                        fullLastCheck = now
+                    }
                 }
             }
         }
@@ -1052,7 +1175,7 @@ class OverlayService : Service() {
     }
 
     private fun inflate(r: Rect, maxW: Int, maxH: Int): Rect {
-        val pad = 8
+        val pad = 10
         val l = (r.left - pad).coerceAtLeast(0)
         val t = (r.top - pad).coerceAtLeast(0)
         val rr = (r.right + pad).coerceAtMost(maxW)
@@ -1060,10 +1183,35 @@ class OverlayService : Service() {
         return Rect(l, t, rr.coerceAtLeast(l + 1), bb.coerceAtLeast(t + 1))
     }
 
-    private fun processFull(bmp: Bitmap) {
-        toast("جاري ترجمة الشاشة...")
+    private fun fillColors(items: List<FullItem>, bmp: Bitmap) {
+        for (item in items) {
+            try {
+                val r = item.rect
+                val crop = Bitmap.createBitmap(bmp, r.left, r.top, r.width(), r.height())
+                val c = analyzeColors(crop)
+                item.bg = c[0]
+                item.fg = c[1]
+                if (crop !== bmp) crop.recycle()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun processFull(bmp: Bitmap, gen: Int) {
+        val sig = makeSig(bmp)
+        if (!fullShown && fullCand.isEmpty() && sameSig(sig, fullSig, 2)) {
+            // شاشة ثابتة وليس عليها ترجمة: لا حاجة لقراءتها من جديد
+            bmp.recycle()
+            fullBusy = false
+            fullNextAt = System.currentTimeMillis() + 1500
+            return
+        }
+        fullSig = sig
         recognizer.process(InputImage.fromBitmap(bmp, 0))
             .addOnSuccessListener { res ->
+                if (!fullLive || gen != fullGen) {
+                    bmp.recycle()
+                    return@addOnSuccessListener
+                }
                 val items = ArrayList<FullItem>()
                 for (b in res.textBlocks) {
                     if (items.size >= 40) break
@@ -1071,77 +1219,115 @@ class OverlayService : Service() {
                     val t = b.text.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
                     if (t.length < 2 || !looksLikeText(t)) continue
                     if (box.width() < 24 || box.height() < 14) continue
+                    // تجاهل النص المائل (مثل أسماء الخرائط المكتوبة بالقطر)
+                    val cp = b.cornerPoints
+                    if (cp != null && cp.size >= 2) {
+                        val ang = Math.toDegrees(
+                            Math.atan2(
+                                (cp[1].y - cp[0].y).toDouble(),
+                                (cp[1].x - cp[0].x).toDouble()
+                            )
+                        )
+                        if (Math.abs(ang) > 10.0) continue
+                    }
                     items.add(FullItem(t, inflate(Rect(box), bmp.width, bmp.height)))
                 }
-                for (item in items) {
-                    try {
-                        val r = item.rect
-                        val crop = Bitmap.createBitmap(bmp, r.left, r.top, r.width(), r.height())
-                        val c = analyzeColors(crop)
-                        item.bg = c[0]
-                        item.fg = c[1]
-                        if (crop !== bmp) crop.recycle()
-                    } catch (_: Exception) {}
+                items.sortWith(compareBy<FullItem>({ it.rect.top }, { it.rect.left }))
+                val key = items.joinToString("|") {
+                    it.text.lowercase() + "@" + (it.rect.left / 80) + "," + (it.rect.top / 80)
                 }
-                bmp.recycle()
+                val now = System.currentTimeMillis()
 
-                if (!fullBusy) return@addOnSuccessListener
                 if (items.isEmpty()) {
-                    toast("لم أجد نصاً إنجليزياً على الشاشة")
-                    finishFull()
+                    bmp.recycle()
+                    clearFullOverlay()
+                    fullCand = ""
+                    fullCandItems = null
+                    fullBusy = false
+                    fullNextAt = now + 1500
                     return@addOnSuccessListener
                 }
-                var remaining = items.size
-                for (item in items) {
-                    TranslationEngine.translate(translator, item.text) { out ->
-                        item.out = out
-                        remaining--
-                        if (remaining == 0 && fullBusy) renderFull(items)
-                    }
+                if (fullShown && key == fullKey) {
+                    // النص لم يتغير: تبقى الترجمة كما هي
+                    bmp.recycle()
+                    fullBusy = false
+                    fullLastCheck = now
+                    return@addOnSuccessListener
                 }
+                fillColors(items, bmp)
+                bmp.recycle()
+                if (key != fullCand) {
+                    // نص جديد: ننتظر قراءة ثانية للتأكد أنه استقر
+                    fullCand = key
+                    fullCandItems = items
+                    clearFullOverlay()
+                    fullBusy = false
+                    fullNextAt = now + 600
+                    return@addOnSuccessListener
+                }
+                fullCand = ""
+                fullCandItems = null
+                translateAndRender(items, key, gen)
             }
             .addOnFailureListener {
                 bmp.recycle()
-                toast("فشلت قراءة النص من الشاشة")
-                finishFull()
+                fullBusy = false
+                fullNextAt = System.currentTimeMillis() + 1500
             }
     }
 
-    private fun renderFull(items: List<FullItem>) {
-        val m = realMetrics()
-        val container = FrameLayout(this)
-        container.layoutDirection = View.LAYOUT_DIRECTION_LTR
-        val p = WindowManager.LayoutParams(
-            m.widthPixels, m.heightPixels, overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.LEFT
-            x = 0
-            y = 0
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            }
-        }
-        try {
-            wm.addView(container, p)
-        } catch (e: Exception) {
-            toast("تعذر عرض الترجمة")
-            finishFull()
+    private fun translateAndRender(items: List<FullItem>, key: String, gen: Int) {
+        var remaining = items.size
+        if (remaining == 0) {
+            fullBusy = false
             return
         }
-        fullView = container
-        container.post {
-            if (fullView !== container) return@post
-            val loc = IntArray(2)
-            container.getLocationOnScreen(loc)
-            for (item in items) addFullText(container, item, loc[0], loc[1])
+        for (item in items) {
+            TranslationEngine.translate(translator, item.text) { out ->
+                item.out = out
+                remaining--
+                if (remaining == 0) {
+                    if (fullLive && gen == fullGen) {
+                        renderFullItems(items)
+                        fullKey = key
+                        fullShown = true
+                    }
+                    fullBusy = false
+                    val now = System.currentTimeMillis()
+                    fullLastCheck = now
+                    fullNextAt = now + 1500
+                }
+            }
         }
-        finishFull()
+    }
+
+    private fun renderFullItems(items: List<FullItem>) {
+        val c = fullContainer ?: return
+        val doAdd = {
+            c.removeAllViews()
+            for (item in items) addFullText(c, item, fullOx, fullOy)
+            c.visibility = View.VISIBLE
+        }
+        if (fullOffsetKnown) {
+            doAdd()
+        } else {
+            c.post {
+                if (fullContainer === c && fullLive) {
+                    val loc = IntArray(2)
+                    c.getLocationOnScreen(loc)
+                    fullOx = loc[0]
+                    fullOy = loc[1]
+                    fullOffsetKnown = true
+                    doAdd()
+                }
+            }
+        }
+    }
+
+    private fun clearFullOverlay() {
+        fullContainer?.removeAllViews()
+        fullShown = false
+        fullKey = ""
     }
 
     private fun addFullText(container: FrameLayout, item: FullItem, ox: Int, oy: Int) {
@@ -1188,21 +1374,9 @@ class OverlayService : Service() {
         container.addView(tv, lp)
     }
 
-    private fun removeFull() {
-        fullView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
-        fullView = null
-    }
-
-    private fun finishFull() {
-        fullBusy = false
-        mainHandler.removeCallbacks(fullTimeout)
-        resetCaptureResources()
-        showIconOnTop()
-    }
-
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
-        removeFull()
+        stopFull()
         removeBox()
         iconView?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         iconView = null
