@@ -20,9 +20,11 @@ jobs:
 
       - name: Install fixed signing key
         run: |
-          mkdir -p ~/.android
-          tr -d ' \r\n' < app/debug.keystore.b64 | base64 -d > ~/.android/debug.keystore
-          keytool -list -keystore ~/.android/debug.keystore -storepass android | head -5
+          set -e
+          tr -d ' \r\n' < app/debug.keystore.b64 | base64 -d > app/ci.keystore
+          echo "size: $(wc -c < app/ci.keystore)"
+          printf '%s  %s\n' a52d21e9e37c96be33bb0aa63ca024f1adcc5f9a4339ca1fac61269fd6766f7e app/ci.keystore | sha256sum -c -
+          keytool -list -keystore app/ci.keystore -storepass android
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v3
@@ -31,10 +33,13 @@ jobs:
 
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
+
       - name: Print APK info
+        continue-on-error: true
         run: |
           APKSIGNER=$(ls -d $ANDROID_HOME/build-tools/*/apksigner | tail -1)
           $APKSIGNER verify --print-certs app/build/outputs/apk/debug/app-debug.apk | head -3
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
