@@ -8,8 +8,8 @@ import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.TextView
 import android.widget.SeekBar
+import android.widget.TextView
 
 class SettingsActivity : Activity() {
 
@@ -21,15 +21,28 @@ class SettingsActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.WHITE)
-            setPadding(dp(20), dp(24), dp(20), dp(32))
+            setPadding(dp(20), dp(16), dp(20), dp(32))
             layoutDirection = View.LAYOUT_DIRECTION_RTL
         }
-        addSlider(root, "استدارة زوايا مربع الترجمة", "radius", 25)
-        root.addView(TextView(this).apply {
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_RTL
+        }
+        header.addView(TextView(this).apply {
+            text = "→"
+            textSize = 28f
+            setTextColor(Color.parseColor("#1565C0"))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setOnClickListener { finish() }
+        })
+        header.addView(TextView(this).apply {
             text = "الإعدادات"
             textSize = 24f
             setTextColor(Color.parseColor("#1565C0"))
         })
+        root.addView(header)
 
         addSetting(
             root, "الفحص عند لمس الشاشة",
@@ -49,6 +62,7 @@ class SettingsActivity : Activity() {
             root, "شفافية خلفية الترجمة", "",
             "alpha", 100, listOf("كاملة", "85%", "70%"), listOf(100, 85, 70)
         )
+        addSlider(root, "استدارة زوايا مربع الترجمة", "radius", 25)
 
         root.addView(TextView(this).apply {
             text = "التغييرات تُطبّق فوراً، وتظهر عند الترجمة التالية."
@@ -62,6 +76,7 @@ class SettingsActivity : Activity() {
             addView(root)
         })
     }
+
     private fun addSlider(parent: LinearLayout, title: String, key: String, def: Int) {
         parent.addView(TextView(this).apply {
             text = title
@@ -109,6 +124,7 @@ class SettingsActivity : Activity() {
         parent.addView(row)
         parent.addView(preview)
     }
+
     private fun addSetting(
         parent: LinearLayout, title: String, hint: String, key: String, def: Int,
         labels: List<String>, values: List<Int>
