@@ -71,7 +71,7 @@ object TranslationEngine {
     )
 
     fun translate(translator: Translator, raw: String, onDone: (String) -> Unit) {
-        val parts = split(clean(raw))
+                val parts = UserDict.parts(clean(raw))
         if (parts.isEmpty()) {
             onDone(raw)
             return
@@ -88,6 +88,7 @@ object TranslationEngine {
     }
 
     private fun translateOne(translator: Translator, s: String, cb: (String) -> Unit) {
+                if (s.startsWith("\u0001")) { cb(s.substring(1)); return }
         terms[key(s)]?.let { cb(it); return }
         cache[s]?.let { cb(it); return }
         translator.translate(s)
