@@ -138,6 +138,7 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                UserDict.load(this)
         recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         translator = Translation.getClient(
             TranslatorOptions.Builder()
