@@ -1,17 +1,38 @@
 package com.translatorpro.app
 
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
 import com.google.mlkit.nl.translate.Translator
+import org.json.JSONArray
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.util.concurrent.Executors
 
 object TranslationEngine {
 
-    private val cache = object : LinkedHashMap<String, String>(64, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
-            return size > 300
-        }
+    private var appCtx: Context? = null
+    private val main = Handler(Looper.getMainLooper())
+    private val pool = Executors.newFixedThreadPool(3)
+    private var onlineFailUntil = 0L
+
+    fun init(c: Context) {
+        appCtx = c.applicationContext
     }
 
-    // تصحيحات بعد الترجمة: "الصيغة الخاطئة" to "الصيغة الصحيحة"
-    // أضف هنا أي كلمة تراها مترجمة بشكل سيئ في لعبتك
+    private fun lru(): LinkedHashMap<String, String> =
+        object : LinkedHashMap<String, String>(64, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+                return size > 300
+            }
+        }
+
+    private val cacheOn = lru()
+    private val cacheOff = lru()
+
+    // تصحيحات بعد الترجمة الأوفلاين: "الصيغة الخاطئة" to "الصيغة الصحيحة"
     private val fixes = mapOf<String, String>(
         // "كلمة خاطئة" to "كلمة صحيحة",
     )
@@ -70,10 +91,91 @@ object TranslationEngine {
         "sorry" to "آسف", "hello" to "مرحباً", "goodbye" to "وداعاً"
     )
 
+    private fun useOnline(): Boolean {
+        val c = appCtx ?: return System.currentTimeMillis() >= onlineFailUntil
+        return Prefs.getInt(c, "engine", 1) == 1 && System.currentTimeMillis() >= onlineFailUntil
+    }
+
     fun translate(translator: Translator, raw: String, onDone: (String) -> Unit) {
-                val parts = UserDict.parts(clean(raw))
-        if (parts.isEmpty()) {
+        val text = clean(raw)
+        if (text.isBlank()) {
             onDone(raw)
+            return
+        }
+        terms[key(text)]?.let { onDone(it); return }
+
+        if (useOnline()) {
+            cacheOn[text]?.let { onDone(it); return }
+            pool.execute {
+                val r = fetchOnline(text)
+                main.post {
+                    if (r != null) {
+                        cacheOn[text] = r
+                        onDone(r)
+                    } else {
+                        val now = System.currentTimeMillis()
+                        if (now >= onlineFailUntil) {
+                            appCtx?.let {
+                                Toast.makeText(
+                                    it, "تعذر الاتصال بالإنترنت، تحويل للأوفلاين مؤقتاً",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                        onlineFailUntil = now + 20000
+                        offline(translator, raw, text, onDone)
+                    }
+                }
+            }
+        } else {
+            offline(translator, raw, text, onDone)
+        }
+    }
+
+    // ---------------- أونلاين ----------------
+
+    private fun fetchOnline(q: String): String? {
+        if (q.length > 1500) return null
+        var conn: HttpURLConnection? = null
+        return try {
+            val url = URL(
+                "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ar&dt=t&q=" +
+                        URLEncoder.encode(q, "UTF-8")
+            )
+            conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 4000
+            conn.readTimeout = 6000
+            conn.requestMethod = "GET"
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+            if (conn.responseCode != 200) return null
+            val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val arr = JSONArray(body).getJSONArray(0)
+            val sb = StringBuilder()
+            for (i in 0 until arr.length()) {
+                val part = arr.optJSONArray(i) ?: continue
+                sb.append(part.optString(0, ""))
+            }
+            val out = sb.toString().trim()
+            if (out.isEmpty()) null else out
+        } catch (e: Exception) {
+            null
+        } finally {
+            conn?.disconnect()
+        }
+    }
+
+    // ---------------- أوفلاين (ML Kit) ----------------
+
+    private fun offline(translator: Translator, raw: String, text: String, onDone: (String) -> Unit) {
+        // كلمة واحدة بحروف كبيرة (غالباً اسم شخصية): نتركها كما هي
+        val rt = raw.trim()
+        if (rt.length in 3..14 && rt.all { it.isLetter() } && rt.all { it.isUpperCase() }) {
+            onDone(rt)
+            return
+        }
+        val parts = split(text)
+        if (parts.isEmpty()) {
+            onDone(text)
             return
         }
         val results = arrayOfNulls<String>(parts.size)
@@ -88,13 +190,12 @@ object TranslationEngine {
     }
 
     private fun translateOne(translator: Translator, s: String, cb: (String) -> Unit) {
-                if (s.startsWith("\u0001")) { cb(s.substring(1)); return }
         terms[key(s)]?.let { cb(it); return }
-        cache[s]?.let { cb(it); return }
+        cacheOff[s]?.let { cb(it); return }
         translator.translate(s)
             .addOnSuccessListener { t ->
                 val f = applyFixes(t)
-                cache[s] = f
+                cacheOff[s] = f
                 cb(f)
             }
             .addOnFailureListener { cb(s) }
