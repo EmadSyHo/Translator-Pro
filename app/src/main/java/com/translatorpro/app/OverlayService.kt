@@ -78,6 +78,7 @@ class OverlayService : Service() {
     private var fullLive = false
     private var fullGen = 0
     private var fullBusy = false
+    private var fullBusySince = 0L
     private var fullContainer: FrameLayout? = null
     private var fullParams: WindowManager.LayoutParams? = null
     private var fullOx = 0
@@ -128,6 +129,9 @@ class OverlayService : Service() {
 
     private val HIDE_WAIT_MS = 250L
     private val TAP_DELAY_MS = 800L
+    private val FULL_IDLE_MS = 2000L
+    private val FULL_WATCHDOG_MS = 12000L
+    private val OCR_MAX_W = 1400
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -1072,8 +1076,20 @@ class OverlayService : Service() {
     private val fullTick = object : Runnable {
         override fun run() {
             if (!fullLive) return
+            val now = System.currentTimeMillis()
+
+            // حارس: إن علقت عملية أكثر من المهلة نلغيها ونستأنف
+            if (fullBusy && now - fullBusySince > FULL_WATCHDOG_MS) {
+                fullGen++
+                fullBusy = false
+                fullCand = ""
+                fullCandItems = null
+                fullRestore()
+                fullNextAt = now + 500
+                toast("تم استئناف الترجمة تلقائياً")
+            }
+
             if (!fullBusy) {
-                val now = System.currentTimeMillis()
                 if (fullShown) {
                     val iv = Prefs.getInt(this@OverlayService, "fullInterval", 5) * 1000L
                     val byTouch = fullTouchPending && now >= fullTouchAt
@@ -1089,7 +1105,8 @@ class OverlayService : Service() {
 
     private fun startFullCheck(hide: Boolean) {
         fullBusy = true
-        fullLastCheck = System.currentTimeMillis()
+        fullBusySince = System.currentTimeMillis()
+        fullLastCheck = fullBusySince
         fullTouchPending = false
         val gen = fullGen
         val c = fullContainer
@@ -1147,7 +1164,7 @@ class OverlayService : Service() {
                     } else {
                         fullBusy = false
                         val now = System.currentTimeMillis()
-                        fullNextAt = now + 1500
+                        fullNextAt = now + FULL_IDLE_MS
                         fullLastCheck = now
                     }
                 }
@@ -1202,12 +1219,25 @@ class OverlayService : Service() {
             // شاشة ثابتة وليس عليها ترجمة: لا حاجة لقراءتها من جديد
             bmp.recycle()
             fullBusy = false
-            fullNextAt = System.currentTimeMillis() + 1500
+            fullNextAt = System.currentTimeMillis() + FULL_IDLE_MS
             return
         }
         fullSig = sig
-        recognizer.process(InputImage.fromBitmap(bmp, 0))
+
+        // نصغّر الصورة قبل القراءة لتخفيف الحرارة
+        val s = if (bmp.width > OCR_MAX_W) OCR_MAX_W.toFloat() / bmp.width else 1f
+        val small = if (s < 1f) {
+            Bitmap.createScaledBitmap(
+                bmp,
+                (bmp.width * s).toInt().coerceAtLeast(1),
+                (bmp.height * s).toInt().coerceAtLeast(1),
+                true
+            )
+        } else bmp
+
+        recognizer.process(InputImage.fromBitmap(small, 0))
             .addOnSuccessListener { res ->
+                if (small !== bmp) small.recycle()
                 if (!fullLive || gen != fullGen) {
                     bmp.recycle()
                     return@addOnSuccessListener
@@ -1215,7 +1245,11 @@ class OverlayService : Service() {
                 val items = ArrayList<FullItem>()
                 for (b in res.textBlocks) {
                     if (items.size >= 40) break
-                    val box = b.boundingBox ?: continue
+                    val sb = b.boundingBox ?: continue
+                    val box = Rect(
+                        (sb.left / s).toInt(), (sb.top / s).toInt(),
+                        (sb.right / s).toInt(), (sb.bottom / s).toInt()
+                    )
                     val t = b.text.replace("\n", " ").replace(Regex("\\s+"), " ").trim()
                     if (t.length < 2 || !looksLikeText(t)) continue
                     if (box.width() < 24 || box.height() < 14) continue
@@ -1230,7 +1264,7 @@ class OverlayService : Service() {
                         )
                         if (Math.abs(ang) > 10.0) continue
                     }
-                    items.add(FullItem(t, inflate(Rect(box), bmp.width, bmp.height)))
+                    items.add(FullItem(t, inflate(box, bmp.width, bmp.height)))
                 }
                 items.sortWith(compareBy<FullItem>({ it.rect.top }, { it.rect.left }))
                 val key = items.joinToString("|") {
@@ -1244,7 +1278,7 @@ class OverlayService : Service() {
                     fullCand = ""
                     fullCandItems = null
                     fullBusy = false
-                    fullNextAt = now + 1500
+                    fullNextAt = now + FULL_IDLE_MS
                     return@addOnSuccessListener
                 }
                 if (fullShown && key == fullKey) {
@@ -1270,9 +1304,12 @@ class OverlayService : Service() {
                 translateAndRender(items, key, gen)
             }
             .addOnFailureListener {
+                if (small !== bmp) small.recycle()
                 bmp.recycle()
-                fullBusy = false
-                fullNextAt = System.currentTimeMillis() + 1500
+                if (fullLive && gen == fullGen) {
+                    fullBusy = false
+                    fullNextAt = System.currentTimeMillis() + FULL_IDLE_MS
+                }
             }
     }
 
@@ -1286,16 +1323,15 @@ class OverlayService : Service() {
             TranslationEngine.translate(translator, item.text) { out ->
                 item.out = out
                 remaining--
-                if (remaining == 0) {
-                    if (fullLive && gen == fullGen) {
-                        renderFullItems(items)
-                        fullKey = key
-                        fullShown = true
-                    }
+                // العمليات القديمة الملغاة لا تؤثر على الفحص الحالي
+                if (remaining == 0 && fullLive && gen == fullGen) {
+                    renderFullItems(items)
+                    fullKey = key
+                    fullShown = true
                     fullBusy = false
                     val now = System.currentTimeMillis()
                     fullLastCheck = now
-                    fullNextAt = now + 1500
+                    fullNextAt = now + FULL_IDLE_MS
                 }
             }
         }
