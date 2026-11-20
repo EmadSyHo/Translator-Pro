@@ -68,6 +68,11 @@ class SettingsActivity : Activity() {
             root, "شفافية خلفية الترجمة", "",
             "alpha", 100, listOf("كاملة", "85%", "70%"), listOf(100, 85, 70)
         )
+                addSetting(
+            root, "محرك الترجمة",
+            "الأونلاين أدق بكثير لكنه يحتاج إنترنت ويرسل النص المقروء إلى Google. عند انقطاع الإنترنت يتحول للأوفلاين تلقائياً.",
+            "engine", 1, listOf("أونلاين (أدق)", "أوفلاين"), listOf(1, 0)
+        )
         addSlider(root, "استدارة زوايا مربع الترجمة", "radius", 25)
                 root.addView(TextView(this).apply {
             text = "قاموسي الخاص (أسماء ومصطلحات) ←"
