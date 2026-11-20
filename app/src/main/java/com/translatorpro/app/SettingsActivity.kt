@@ -10,6 +10,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import android.content.Intent
 
 class SettingsActivity : Activity() {
 
@@ -68,6 +69,13 @@ class SettingsActivity : Activity() {
             "alpha", 100, listOf("كاملة", "85%", "70%"), listOf(100, 85, 70)
         )
         addSlider(root, "استدارة زوايا مربع الترجمة", "radius", 25)
+                root.addView(TextView(this).apply {
+            text = "قاموسي الخاص (أسماء ومصطلحات) ←"
+            textSize = 16f
+            setTextColor(Color.parseColor("#1565C0"))
+            setPadding(0, dp(26), 0, dp(4))
+            setOnClickListener { startActivity(Intent(this@SettingsActivity, DictionaryActivity::class.java)) }
+        })
 
         root.addView(TextView(this).apply {
             text = "التغييرات تُطبّق فوراً، وتظهر عند الترجمة التالية."
